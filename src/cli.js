@@ -1,12 +1,38 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BANKR_WALLET = '0x2a16625fad3b0d840ac02c7c59edea3781e340ae';
 const VAULTLINE_UPLOAD_URL = `https://x402.bankr.bot/${BANKR_WALLET}/vaultline-upload`;
+const DEFAULT_MAX_FILE_BYTES = 256 * 1024;
+const DEFAULT_CHECK_TIMEOUT_MS = 120_000;
+
+const SECRET_PATTERNS = [
+  /^\.env(\.|$)/,
+  /(^|\/)\.env(\.|$)/,
+  /\.pem$/i,
+  /\.key$/i,
+  /\.p12$/i,
+  /\.pfx$/i,
+  /(^|\/)id_rsa$/i,
+  /(^|\/)id_ed25519$/i,
+  /secret/i,
+  /private[-_]?key/i,
+  /token/i,
+  /credential/i
+];
 
 function parseArgs(argv) {
   const args = {
@@ -14,10 +40,16 @@ function parseArgs(argv) {
     out: '.agent-pack',
     task: '',
     maxFiles: 80,
+    maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     includeUntracked: false,
+    copyFiles: true,
+    runChecks: false,
+    checks: [],
+    artifacts: [],
     vaultline: false,
     vaultlinePath: '',
-    yes: false
+    yes: false,
+    json: false
   };
 
   const rest = [];
@@ -25,11 +57,17 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--out') args.out = requiredValue(argv, ++i, arg);
     else if (arg === '--task') args.task = requiredValue(argv, ++i, arg);
-    else if (arg === '--max-files') args.maxFiles = Number(requiredValue(argv, ++i, arg));
+    else if (arg === '--max-files') args.maxFiles = parsePositiveInt(requiredValue(argv, ++i, arg), arg);
+    else if (arg === '--max-file-bytes') args.maxFileBytes = parsePositiveInt(requiredValue(argv, ++i, arg), arg);
     else if (arg === '--include-untracked') args.includeUntracked = true;
+    else if (arg === '--no-file-copies') args.copyFiles = false;
+    else if (arg === '--run-checks') args.runChecks = true;
+    else if (arg === '--check') args.checks.push(requiredValue(argv, ++i, arg));
+    else if (arg === '--artifact') args.artifacts.push(requiredValue(argv, ++i, arg));
     else if (arg === '--vaultline') args.vaultline = true;
     else if (arg === '--vaultline-path') args.vaultlinePath = requiredValue(argv, ++i, arg);
     else if (arg === '--yes' || arg === '-y') args.yes = true;
+    else if (arg === '--json') args.json = true;
     else if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -41,9 +79,6 @@ function parseArgs(argv) {
   }
 
   if (rest[0]) args.target = rest[0];
-  if (!Number.isFinite(args.maxFiles) || args.maxFiles < 1) {
-    throw new Error('--max-files must be a positive number');
-  }
   return args;
 }
 
@@ -51,6 +86,12 @@ function requiredValue(argv, index, flag) {
   const value = argv[index];
   if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
   return value;
+}
+
+function parsePositiveInt(value, flag) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${flag} must be a positive integer`);
+  return parsed;
 }
 
 function printHelp() {
@@ -62,11 +103,17 @@ Usage:
 Options:
   --out <dir>             Output directory. Default: .agent-pack
   --task <text>           Task or delivery summary
-  --max-files <n>         Max files to include in manifest. Default: 80
+  --max-files <n>         Max project files to index. Default: 80
+  --max-file-bytes <n>    Max bytes per copied source file. Default: 262144
   --include-untracked     Include untracked files in inventory
+  --no-file-copies        Only write metadata, not source file copies
+  --run-checks            Run detected package checks
+  --check <command>       Add a custom check command. Repeatable
+  --artifact <path>       Attach an artifact file/directory. Repeatable
   --vaultline             Upload bundle through Bankr x402 Vaultline endpoint
   --vaultline-path <path> Vaultline object path
   --yes, -y               Skip Bankr confirmation when uploading
+  --json                  Print machine-readable result JSON
 `);
 }
 
@@ -82,14 +129,27 @@ function run(command, args, cwd) {
   }
 }
 
-function getGitRoot(target) {
-  const root = run('git', ['rev-parse', '--show-toplevel'], target);
-  if (root && resolve(root) === resolve(target)) return root;
-  return target;
+function runRaw(command, args, cwd) {
+  try {
+    return execFileSync(command, args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch {
+    return '';
+  }
 }
 
-function readPackage(target) {
-  const path = join(target, 'package.json');
+function getProjectRoot(target) {
+  const absolute = resolve(target);
+  const gitRoot = run('git', ['rev-parse', '--show-toplevel'], absolute);
+  if (gitRoot && resolve(gitRoot) === absolute) return absolute;
+  return absolute;
+}
+
+function readPackage(root) {
+  const path = join(root, 'package.json');
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
@@ -98,39 +158,50 @@ function readPackage(target) {
   }
 }
 
-function gitFiles(root, includeUntracked, maxFiles) {
+function collectFiles(root, includeUntracked, maxFiles) {
   const ownsGitRepo = existsSync(join(root, '.git'));
-  if (!ownsGitRepo) return localFiles(root, maxFiles).map((file) => fileInfo(root, file));
+  const candidates = ownsGitRepo
+    ? gitCandidateFiles(root, includeUntracked)
+    : localCandidateFiles(root);
 
-  const porcelain = run('git', ['status', '--short'], root);
+  const seen = new Set();
+  const files = [];
+  for (const file of candidates) {
+    if (files.length >= maxFiles) break;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    if (isIgnoredForPack(file)) continue;
+    files.push(fileInfo(root, file));
+  }
+  return files;
+}
+
+function gitCandidateFiles(root, includeUntracked) {
+  const porcelain = runRaw('git', ['status', '--short'], root);
   const changed = porcelain
     .split('\n')
     .filter(Boolean)
     .filter((line) => includeUntracked || !line.startsWith('??'))
-    .map((line) => line.slice(3).trim())
+    .map(parseGitStatusPath)
     .filter(Boolean);
 
   const tracked = run('git', ['ls-files'], root)
     .split('\n')
     .filter(Boolean);
 
-  const seen = new Set();
-  return [...changed, ...tracked]
-    .filter((file) => {
-      if (seen.has(file)) return false;
-      seen.add(file);
-      return !isIgnoredForPack(file);
-    })
-    .slice(0, maxFiles)
-    .map((file) => fileInfo(root, file));
+  return [...changed, ...tracked];
 }
 
-function localFiles(root, maxFiles) {
+function parseGitStatusPath(line) {
+  const path = line.replace(/^.. /, '').trim();
+  const renameMarker = ' -> ';
+  return path.includes(renameMarker) ? path.split(renameMarker).pop().trim() : path;
+}
+
+function localCandidateFiles(root) {
   const found = [];
   function walk(dir) {
-    if (found.length >= maxFiles) return;
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (found.length >= maxFiles) return;
       const absolute = join(dir, entry.name);
       const file = relative(root, absolute);
       if (isIgnoredForPack(file) || entry.name === '.git' || entry.name === 'node_modules') continue;
@@ -145,41 +216,140 @@ function localFiles(root, maxFiles) {
 function isIgnoredForPack(file) {
   return file.includes('node_modules/')
     || file.includes('.git/')
-    || file.startsWith('.agent-pack/')
+    || file.startsWith('.agent-pack')
     || file.endsWith('.tgz')
     || file === '.DS_Store';
 }
 
+function isSecretLike(file) {
+  return SECRET_PATTERNS.some((pattern) => pattern.test(file));
+}
+
 function fileInfo(root, file) {
   const absolute = join(root, file);
-  if (!existsSync(absolute)) return { path: file, exists: false };
+  if (!existsSync(absolute)) return { path: file, exists: false, included: false, reason: 'missing' };
   const stats = statSync(absolute);
-  if (!stats.isFile()) return { path: file, type: 'non-file' };
+  if (!stats.isFile()) return { path: file, type: 'non-file', included: false, reason: 'not_file' };
   const content = readFileSync(absolute);
   return {
     path: file,
     size: stats.size,
-    sha256: createHash('sha256').update(content).digest('hex')
+    sha256: createHash('sha256').update(content).digest('hex'),
+    included: false,
+    reason: 'pending'
   };
 }
 
-function detectChecks(pkg) {
-  if (!pkg?.scripts) return [];
-  const preferred = ['test', 'lint', 'build', 'typecheck'];
-  return preferred
-    .filter((name) => pkg.scripts[name])
-    .map((name) => ({ name, command: `npm run ${name}`, status: 'not_run' }));
+function plannedChecks(pkg, customChecks) {
+  const checks = [];
+  if (pkg?.scripts) {
+    for (const name of ['test', 'lint', 'build', 'typecheck']) {
+      if (pkg.scripts[name]) checks.push({ name, command: `npm run ${name}`, source: 'package', status: 'not_run' });
+    }
+  }
+  for (const [index, command] of customChecks.entries()) {
+    checks.push({ name: `custom-${index + 1}`, command, source: 'custom', status: 'not_run' });
+  }
+  return checks;
+}
+
+function executeChecks(root, outDir, checks, shouldRun) {
+  const checksDir = join(outDir, 'checks');
+  mkdirSync(checksDir, { recursive: true });
+
+  return checks.map((check) => {
+    if (!shouldRun) return check;
+    const startedAt = new Date().toISOString();
+    const result = spawnSync(check.command, {
+      cwd: root,
+      shell: true,
+      encoding: 'utf8',
+      timeout: DEFAULT_CHECK_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024
+    });
+    const finishedAt = new Date().toISOString();
+    const logName = `${safeName(check.name)}.log`;
+    const timedOut = Boolean(result.error && result.error.code === 'ETIMEDOUT');
+    const output = [
+      `$ ${check.command}`,
+      '',
+      result.stdout || '',
+      result.stderr ? `\n[stderr]\n${result.stderr}` : ''
+    ].join('\n');
+    writeFileSync(join(checksDir, logName), output);
+    return {
+      ...check,
+      status: result.status === 0 ? 'passed' : timedOut ? 'timed_out' : 'failed',
+      exitCode: result.status,
+      startedAt,
+      finishedAt,
+      log: `checks/${logName}`
+    };
+  });
+}
+
+function copySelectedFiles(root, outDir, files, maxFileBytes, enabled) {
+  const filesDir = join(outDir, 'files');
+  mkdirSync(filesDir, { recursive: true });
+
+  return files.map((file) => {
+    if (!enabled) return { ...file, included: false, reason: 'file_copies_disabled' };
+    if (!file.exists && file.reason === 'missing') return file;
+    if (isSecretLike(file.path)) return { ...file, included: false, reason: 'secret_like_path' };
+    if ((file.size ?? 0) > maxFileBytes) return { ...file, included: false, reason: 'too_large' };
+
+    const source = join(root, file.path);
+    const destination = join(filesDir, file.path);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(source, destination);
+    return { ...file, included: true, bundlePath: `files/${file.path}`, reason: 'included' };
+  });
+}
+
+function copyArtifacts(root, outDir, artifactPaths) {
+  const artifactsDir = join(outDir, 'artifacts');
+  mkdirSync(artifactsDir, { recursive: true });
+  const copied = [];
+
+  for (const artifactPath of artifactPaths) {
+    const absolute = resolve(root, artifactPath);
+    if (!existsSync(absolute)) {
+      copied.push({ path: artifactPath, included: false, reason: 'missing' });
+      continue;
+    }
+    const stats = statSync(absolute);
+    if (stats.isDirectory()) {
+      const files = localCandidateFiles(absolute);
+      for (const file of files) {
+        const source = join(absolute, file);
+        const destination = join(artifactsDir, basename(absolute), file);
+        mkdirSync(dirname(destination), { recursive: true });
+        copyFileSync(source, destination);
+        copied.push({ path: relative(root, source), included: true, bundlePath: relative(outDir, destination), size: statSync(source).size });
+      }
+    } else if (stats.isFile()) {
+      const destination = join(artifactsDir, basename(absolute));
+      copyFileSync(absolute, destination);
+      copied.push({ path: relative(root, absolute), included: true, bundlePath: relative(outDir, destination), size: stats.size });
+    }
+  }
+  return copied;
 }
 
 function writeBundle({ args, root, outDir, files, pkg, checks }) {
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
 
+  const copiedFiles = copySelectedFiles(root, outDir, files, args.maxFileBytes, args.copyFiles);
+  const artifacts = copyArtifacts(root, outDir, args.artifacts);
+  const executedChecks = executeChecks(root, outDir, checks, args.runChecks);
+
   const git = {
     root,
     branch: run('git', ['branch', '--show-current'], root),
     commit: run('git', ['rev-parse', 'HEAD'], root),
-    status: run('git', ['status', '--short'], root)
+    status: run('git', ['status', '--short'], root),
+    diffStat: run('git', ['diff', '--stat'], root)
   };
 
   const manifest = {
@@ -189,31 +359,55 @@ function writeBundle({ args, root, outDir, files, pkg, checks }) {
     target: root,
     package: pkg ? { name: pkg.name, version: pkg.version, private: Boolean(pkg.private) } : null,
     git,
-    files,
-    checks,
+    files: copiedFiles,
+    artifacts,
+    checks: executedChecks,
     vaultline: {
       uploadUrl: VAULTLINE_UPLOAD_URL,
       suggestedPath: args.vaultlinePath || defaultVaultlinePath(root)
     }
   };
 
+  const receipt = {
+    ok: true,
+    task: manifest.task,
+    createdAt: manifest.createdAt,
+    filesIndexed: copiedFiles.length,
+    filesIncluded: copiedFiles.filter((file) => file.included).length,
+    artifactsIncluded: artifacts.filter((artifact) => artifact.included).length,
+    checksPassed: executedChecks.filter((check) => check.status === 'passed').length,
+    checksFailed: executedChecks.filter((check) => ['failed', 'timed_out'].includes(check.status)).length,
+    vaultlinePath: manifest.vaultline.suggestedPath
+  };
+
   writeFileSync(join(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-  writeFileSync(join(outDir, 'files.txt'), files.map((file) => `${file.path} ${file.size ?? '-'} ${file.sha256 ?? ''}`.trim()).join('\n') + '\n');
-  writeFileSync(join(outDir, 'checks.txt'), checks.map((check) => `${check.status} ${check.command}`).join('\n') + '\n');
-  writeFileSync(join(outDir, 'summary.md'), summaryMarkdown(manifest));
+  writeFileSync(join(outDir, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
+  writeFileSync(join(outDir, 'files.txt'), fileListText(copiedFiles));
+  writeFileSync(join(outDir, 'checks.txt'), checkListText(executedChecks));
+  writeFileSync(join(outDir, 'summary.md'), summaryMarkdown(manifest, receipt));
 
   const archive = join(outDir, 'bundle.tgz');
-  const archiveResult = spawnSync('tar', ['-czf', archive, '-C', outDir, 'manifest.json', 'summary.md', 'files.txt', 'checks.txt'], {
+  const archiveResult = spawnSync('tar', ['--exclude', 'bundle.tgz', '-czf', archive, '-C', outDir, '.'], {
     encoding: 'utf8'
   });
   if (archiveResult.status !== 0) {
     throw new Error(`Failed to create archive: ${archiveResult.stderr || archiveResult.stdout}`);
   }
 
-  return { manifest, archive };
+  return { manifest, receipt, archive };
 }
 
-function summaryMarkdown(manifest) {
+function fileListText(files) {
+  return files
+    .map((file) => `${file.included ? 'included' : 'skipped'} ${file.path} ${file.size ?? '-'} ${file.sha256 ?? ''} ${file.reason ?? ''}`.trim())
+    .join('\n') + '\n';
+}
+
+function checkListText(checks) {
+  return checks.map((check) => `${check.status} ${check.command}${check.log ? ` (${check.log})` : ''}`).join('\n') + '\n';
+}
+
+function summaryMarkdown(manifest, receipt) {
   return `# Agent Pack Delivery
 
 ${manifest.task}
@@ -223,7 +417,9 @@ ${manifest.task}
 - Package: ${manifest.package?.name || 'unknown'}
 - Git branch: ${manifest.git.branch || 'unknown'}
 - Git commit: ${manifest.git.commit || 'unknown'}
-- Files indexed: ${manifest.files.length}
+- Files indexed: ${receipt.filesIndexed}
+- Files included: ${receipt.filesIncluded}
+- Artifacts included: ${receipt.artifactsIncluded}
 
 ## Vaultline
 
@@ -232,7 +428,11 @@ ${manifest.task}
 
 ## Checks
 
-${manifest.checks.length ? manifest.checks.map((check) => `- ${check.command}: ${check.status}`).join('\n') : '- No package checks detected'}
+${manifest.checks.length ? manifest.checks.map((check) => `- ${check.command}: ${check.status}`).join('\n') : '- No checks detected'}
+
+## Safety
+
+Secret-like paths and oversized files are skipped by default.
 `;
 }
 
@@ -262,17 +462,21 @@ function uploadToVaultline(archive, path, yes) {
   return result.stdout.trim();
 }
 
+function safeName(name) {
+  return name.replace(/[^a-zA-Z0-9._-]/g, '-');
+}
+
 export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   const target = resolve(args.target);
   if (!existsSync(target)) throw new Error(`Target does not exist: ${target}`);
 
-  const root = getGitRoot(target);
+  const root = getProjectRoot(target);
   const outDir = resolve(root, args.out);
   const pkg = readPackage(root);
-  const checks = detectChecks(pkg);
-  const files = gitFiles(root, args.includeUntracked, args.maxFiles);
-  const { manifest, archive } = writeBundle({ args, root, outDir, files, pkg, checks });
+  const checks = plannedChecks(pkg, args.checks);
+  const files = collectFiles(root, args.includeUntracked, args.maxFiles);
+  const { manifest, receipt, archive } = writeBundle({ args, root, outDir, files, pkg, checks });
 
   let vaultlineResult = null;
   if (args.vaultline) {
@@ -281,11 +485,31 @@ export function main(argv = process.argv.slice(2)) {
     writeFileSync(join(outDir, 'vaultline.json'), `${vaultlineResult}\n`);
   }
 
-  console.log(`Agent Pack created: ${relative(process.cwd(), outDir) || outDir}`);
-  console.log(`Files indexed: ${files.length}`);
-  console.log(`Archive: ${relative(process.cwd(), archive) || archive}`);
-  console.log(`Vaultline path: ${args.vaultlinePath || manifest.vaultline.suggestedPath}`);
-  if (vaultlineResult) console.log('Vaultline upload: complete');
+  const result = {
+    ok: true,
+    outDir,
+    archive,
+    manifest: join(outDir, 'manifest.json'),
+    receipt: join(outDir, 'receipt.json'),
+    filesIndexed: receipt.filesIndexed,
+    filesIncluded: receipt.filesIncluded,
+    checksPassed: receipt.checksPassed,
+    checksFailed: receipt.checksFailed,
+    vaultlinePath: args.vaultlinePath || manifest.vaultline.suggestedPath,
+    vaultlineUploaded: Boolean(vaultlineResult)
+  };
+
+  if (args.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(`Agent Pack created: ${relative(process.cwd(), outDir) || outDir}`);
+    console.log(`Files indexed: ${receipt.filesIndexed}`);
+    console.log(`Files included: ${receipt.filesIncluded}`);
+    console.log(`Checks: ${receipt.checksPassed} passed, ${receipt.checksFailed} failed`);
+    console.log(`Archive: ${relative(process.cwd(), archive) || archive}`);
+    console.log(`Vaultline path: ${result.vaultlinePath}`);
+    if (vaultlineResult) console.log('Vaultline upload: complete');
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

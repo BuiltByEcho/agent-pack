@@ -16,9 +16,13 @@ Output:
 ```text
 .agent-pack/
   manifest.json
+  receipt.json
   summary.md
   files.txt
   checks.txt
+  files/
+  artifacts/
+  checks/
   bundle.tgz
 ```
 
@@ -44,10 +48,27 @@ Options:
 - `--out <dir>`: output directory, default `.agent-pack`
 - `--task <text>`: task or delivery summary
 - `--max-files <n>`: max changed/tracked files to include in the manifest
+- `--max-file-bytes <n>`: max size for copied source files, default `262144`
 - `--include-untracked`: include untracked files in the inventory
+- `--no-file-copies`: write metadata only, without copying source files
+- `--run-checks`: run detected package checks and store logs
+- `--check <command>`: add a custom check command, repeatable
+- `--artifact <path>`: attach a file or directory, repeatable
 - `--vaultline`: upload the generated bundle through the Bankr Vaultline endpoint
 - `--vaultline-path <path>`: Vaultline path for the uploaded bundle
 - `--yes`: skip Bankr payment confirmation when using `--vaultline`
+- `--json`: print a machine-readable result
+
+Example with checks and artifacts:
+
+```bash
+agent-pack . \
+  --task "agent finished the release candidate" \
+  --run-checks \
+  --artifact archive/screenshots/release.png \
+  --vaultline \
+  --yes
+```
 
 Vaultline upload currently shells out to the Bankr CLI:
 
@@ -63,13 +84,17 @@ This is the groundwork release:
 
 - local bundle generation
 - git-aware file inventory
+- safe file copies inside the bundle
+- secret-like path exclusion by default
+- artifact attachments
 - command/check capture from package scripts
+- check execution logs with `--run-checks`
+- `receipt.json` for downstream automation
 - manifest for downstream automation
 - optional paid Vaultline upload through Bankr x402
 
 Next steps:
 
-- richer screenshots/artifact attachment
 - private wallet-gated Vaultline bundles
 - hosted receipt page
 - CI action that publishes a pack after agent work completes

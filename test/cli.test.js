@@ -1,28 +1,47 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const cli = new URL('../src/cli.js', import.meta.url).pathname;
 
-test('creates an agent delivery bundle', () => {
+test('creates an agent delivery bundle with safe file copies', () => {
   const dir = mkdtempSync(join(tmpdir(), 'agent-pack-'));
   execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'demo', version: '1.0.0', scripts: { test: 'node --version' } }));
   writeFileSync(join(dir, 'index.js'), 'console.log("demo");\n');
+  writeFileSync(join(dir, '.env'), 'SECRET=do-not-copy\n');
   execFileSync('git', ['add', '.'], { cwd: dir });
   execFileSync('git', ['commit', '-m', 'init'], { cwd: dir, stdio: 'ignore' });
 
-  execFileSync(process.execPath, [cli, dir, '--task', 'test bundle', '--out', '.pack'], { cwd: dir });
+  execFileSync(process.execPath, [cli, dir, '--task', 'test bundle', '--out', '.pack', '--include-untracked'], { cwd: dir });
 
   const manifest = JSON.parse(readFileSync(join(dir, '.pack', 'manifest.json'), 'utf8'));
+  const receipt = JSON.parse(readFileSync(join(dir, '.pack', 'receipt.json'), 'utf8'));
   assert.equal(manifest.schema, 'builtbyecho.agent-pack.v1');
   assert.equal(manifest.task, 'test bundle');
   assert.equal(manifest.package.name, 'demo');
-  assert.ok(manifest.files.some((file) => file.path === 'index.js'));
+  assert.ok(manifest.files.some((file) => file.path === 'index.js' && file.included));
+  assert.ok(manifest.files.some((file) => file.path === '.env' && file.reason === 'secret_like_path'));
+  assert.equal(receipt.filesIncluded > 0, true);
+  assert.equal(existsSync(join(dir, '.pack', 'files', 'index.js')), true);
+  assert.equal(existsSync(join(dir, '.pack', 'files', '.env')), false);
+  assert.equal(existsSync(join(dir, '.pack', 'bundle.tgz')), true);
   assert.ok(readFileSync(join(dir, '.pack', 'summary.md'), 'utf8').includes('Agent Pack Delivery'));
+});
+
+test('runs checks and writes logs when requested', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-pack-check-'));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'demo-checks', version: '1.0.0', scripts: { test: 'node --version' } }));
+  writeFileSync(join(dir, 'index.js'), 'console.log("demo");\n');
+
+  execFileSync(process.execPath, [cli, dir, '--task', 'check bundle', '--out', '.pack', '--run-checks'], { cwd: dir });
+
+  const manifest = JSON.parse(readFileSync(join(dir, '.pack', 'manifest.json'), 'utf8'));
+  assert.equal(manifest.checks[0].status, 'passed');
+  assert.equal(existsSync(join(dir, '.pack', manifest.checks[0].log)), true);
 });
