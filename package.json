@@ -1,0 +1,36 @@
+{
+  "name": "@builtbyecho/agent-pack",
+  "version": "0.1.0",
+  "description": "Package agent work into portable delivery bundles and optional Vaultline artifacts.",
+  "type": "module",
+  "bin": {
+    "agent-pack": "src/cli.js"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "smoke": "node src/cli.js . --task \"agent-pack smoke\" --out .agent-pack-smoke --max-files 20"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "handoff",
+    "receipts",
+    "vaultline",
+    "x402",
+    "cli"
+  ],
+  "author": "BuiltByEcho",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BuiltByEcho/agent-pack.git"
+  }
+}
