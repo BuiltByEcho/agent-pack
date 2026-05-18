@@ -1,5 +1,4 @@
 node_modules/
-.agent-pack/
-.agent-pack-smoke/
+.agent-pack*/
 *.tgz
 .DS_Store
