@@ -24,6 +24,7 @@ test('creates an agent delivery bundle with safe file copies', () => {
   const receipt = JSON.parse(readFileSync(join(dir, '.pack', 'receipt.json'), 'utf8'));
   assert.equal(manifest.schema, 'builtbyecho.agent-pack.v1');
   assert.equal(manifest.task, 'test bundle');
+  assert.equal(manifest.target.directory.startsWith('/'), false);
   assert.equal(manifest.package.name, 'demo');
   assert.ok(manifest.files.some((file) => file.path === 'index.js' && file.included));
   assert.ok(manifest.files.some((file) => file.path === '.env' && file.reason === 'secret_like_path'));
@@ -32,6 +33,7 @@ test('creates an agent delivery bundle with safe file copies', () => {
   assert.equal(existsSync(join(dir, '.pack', 'files', '.env')), false);
   assert.equal(existsSync(join(dir, '.pack', 'bundle.tgz')), true);
   assert.ok(readFileSync(join(dir, '.pack', 'summary.md'), 'utf8').includes('Agent Pack Delivery'));
+  assert.equal(readFileSync(join(dir, '.pack', 'manifest.json'), 'utf8').includes(dir), false);
 });
 
 test('runs checks and writes logs when requested', () => {
@@ -44,4 +46,10 @@ test('runs checks and writes logs when requested', () => {
   const manifest = JSON.parse(readFileSync(join(dir, '.pack', 'manifest.json'), 'utf8'));
   assert.equal(manifest.checks[0].status, 'passed');
   assert.equal(existsSync(join(dir, '.pack', manifest.checks[0].log)), true);
+});
+
+test('prints the package version', () => {
+  const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+  const output = execFileSync(process.execPath, [cli, '--version'], { encoding: 'utf8' }).trim();
+  assert.equal(output, version);
 });

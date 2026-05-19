@@ -1,6 +1,7 @@
 # Agent Pack
 
-Agent Pack turns an agent run into a portable delivery bundle.
+Agent Pack turns an agent run into a portable delivery bundle: the manifest,
+receipt, files, artifacts, and checks someone needs to inspect what happened.
 
 Agents produce useful work, but the proof usually gets scattered across chat logs,
 temp folders, screenshots, diffs, and terminal output. Agent Pack creates one
@@ -37,6 +38,18 @@ Together they create a clean loop:
 agent ships work -> Agent Pack bundles proof -> Vaultline stores the artifact
 ```
 
+## Install
+
+```bash
+npm install -g @builtbyecho/agent-pack
+```
+
+Or run without installing:
+
+```bash
+npx @builtbyecho/agent-pack . --task "agent finished the release candidate"
+```
+
 ## Usage
 
 ```bash
@@ -70,6 +83,15 @@ agent-pack . \
   --yes
 ```
 
+Example local-only pack:
+
+```bash
+agent-pack . \
+  --task "agent fixed the API route" \
+  --run-checks \
+  --out .agent-pack
+```
+
 Vaultline upload currently shells out to the Bankr CLI:
 
 ```bash
@@ -78,9 +100,23 @@ bankr x402 call -X POST ... https://x402.bankr.bot/0x2a16625fad3b0d840ac02c7c59e
 
 That keeps the first version small while still using the live x402 payment path.
 
-## First version scope
+## Safety defaults
 
-This is the groundwork release:
+Agent Pack is designed for public handoffs, so it avoids a few common mistakes by
+default:
+
+- skips secret-like paths such as `.env`, private keys, tokens, and credentials
+- skips oversized source files unless you raise `--max-file-bytes`
+- keeps local absolute machine paths out of the generated manifest
+- ignores `node_modules`, `.git`, previous `.agent-pack*` outputs, and `.tgz`
+  archives
+
+Always inspect the generated `manifest.json` and `files/` directory before
+uploading a bundle publicly.
+
+## First release scope
+
+The first public release includes:
 
 - local bundle generation
 - git-aware file inventory
@@ -93,7 +129,7 @@ This is the groundwork release:
 - manifest for downstream automation
 - optional paid Vaultline upload through Bankr x402
 
-Next steps:
+Planned next:
 
 - private wallet-gated Vaultline bundles
 - hosted receipt page

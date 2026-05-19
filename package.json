@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "Package agent work into portable delivery bundles and optional Vaultline artifacts.",
   "type": "module",
+  "main": "src/cli.js",
+  "exports": {
+    ".": "./src/cli.js",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "agent-pack": "src/cli.js"
   },
@@ -13,7 +18,8 @@
   ],
   "scripts": {
     "test": "node --test",
-    "smoke": "node src/cli.js . --task \"agent-pack smoke\" --out .agent-pack-smoke --max-files 20"
+    "smoke": "node src/cli.js . --task \"agent-pack smoke\" --out .agent-pack-smoke --max-files 20",
+    "prepublishOnly": "npm test && npm run smoke"
   },
   "keywords": [
     "ai",
@@ -32,5 +38,12 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BuiltByEcho/agent-pack.git"
+  },
+  "bugs": {
+    "url": "https://github.com/BuiltByEcho/agent-pack/issues"
+  },
+  "homepage": "https://www.builtbyecho.xyz/agent-pack.html",
+  "publishConfig": {
+    "access": "public"
   }
 }

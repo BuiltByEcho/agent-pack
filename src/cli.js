@@ -18,6 +18,7 @@ const BANKR_WALLET = '0x2a16625fad3b0d840ac02c7c59edea3781e340ae';
 const VAULTLINE_UPLOAD_URL = `https://x402.bankr.bot/${BANKR_WALLET}/vaultline-upload`;
 const DEFAULT_MAX_FILE_BYTES = 256 * 1024;
 const DEFAULT_CHECK_TIMEOUT_MS = 120_000;
+const PACKAGE_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 const SECRET_PATTERNS = [
   /^\.env(\.|$)/,
@@ -71,6 +72,9 @@ function parseArgs(argv) {
     else if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
+    } else if (arg === '--version' || arg === '-v') {
+      console.log(PACKAGE_VERSION);
+      process.exit(0);
     } else if (arg.startsWith('-')) {
       throw new Error(`Unknown option: ${arg}`);
     } else {
@@ -114,6 +118,7 @@ Options:
   --vaultline-path <path> Vaultline object path
   --yes, -y               Skip Bankr confirmation when uploading
   --json                  Print machine-readable result JSON
+  --version, -v           Print Agent Pack version
 `);
 }
 
@@ -322,15 +327,25 @@ function copyArtifacts(root, outDir, artifactPaths) {
       const files = localCandidateFiles(absolute);
       for (const file of files) {
         const source = join(absolute, file);
+        const relativeSource = relative(root, source);
+        if (isSecretLike(relativeSource)) {
+          copied.push({ path: relativeSource, included: false, reason: 'secret_like_path' });
+          continue;
+        }
         const destination = join(artifactsDir, basename(absolute), file);
         mkdirSync(dirname(destination), { recursive: true });
         copyFileSync(source, destination);
-        copied.push({ path: relative(root, source), included: true, bundlePath: relative(outDir, destination), size: statSync(source).size });
+        copied.push({ path: relativeSource, included: true, bundlePath: relative(outDir, destination), size: statSync(source).size });
       }
     } else if (stats.isFile()) {
+      const relativeSource = relative(root, absolute);
+      if (isSecretLike(relativeSource)) {
+        copied.push({ path: relativeSource, included: false, reason: 'secret_like_path' });
+        continue;
+      }
       const destination = join(artifactsDir, basename(absolute));
       copyFileSync(absolute, destination);
-      copied.push({ path: relative(root, absolute), included: true, bundlePath: relative(outDir, destination), size: stats.size });
+      copied.push({ path: relativeSource, included: true, bundlePath: relative(outDir, destination), size: stats.size });
     }
   }
   return copied;
@@ -345,7 +360,6 @@ function writeBundle({ args, root, outDir, files, pkg, checks }) {
   const executedChecks = executeChecks(root, outDir, checks, args.runChecks);
 
   const git = {
-    root,
     branch: run('git', ['branch', '--show-current'], root),
     commit: run('git', ['rev-parse', 'HEAD'], root),
     status: run('git', ['status', '--short'], root),
@@ -356,7 +370,10 @@ function writeBundle({ args, root, outDir, files, pkg, checks }) {
     schema: 'builtbyecho.agent-pack.v1',
     createdAt: new Date().toISOString(),
     task: args.task || 'unspecified agent work',
-    target: root,
+    target: {
+      name: pkg?.name || basename(root),
+      directory: basename(root)
+    },
     package: pkg ? { name: pkg.name, version: pkg.version, private: Boolean(pkg.private) } : null,
     git,
     files: copiedFiles,
