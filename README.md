@@ -134,3 +134,10 @@ Planned next:
 - private wallet-gated Vaultline bundles
 - hosted receipt page
 - CI action that publishes a pack after agent work completes
+
+## Docs
+
+- [Quickstart](docs/QUICKSTART.md)
+- [CLI reference](docs/CLI.md)
+- [Vaultline upload flow](docs/VAULTLINE.md)
+- [Release checklist](docs/RELEASE.md)
