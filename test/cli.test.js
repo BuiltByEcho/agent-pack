@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -51,5 +51,15 @@ test('runs checks and writes logs when requested', () => {
 test('prints the package version', () => {
   const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
   const output = execFileSync(process.execPath, [cli, '--version'], { encoding: 'utf8' }).trim();
+  assert.equal(output, version);
+});
+
+test('runs through an npm-style bin symlink', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-pack-bin-'));
+  const bin = join(dir, 'agent-pack');
+  symlinkSync(cli, bin);
+
+  const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+  const output = execFileSync(bin, ['--version'], { encoding: 'utf8' }).trim();
   assert.equal(output, version);
 });
